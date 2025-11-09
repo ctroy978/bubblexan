@@ -19,6 +19,7 @@ python generate_bubblesheet.py \
 - Questions can range from 1–50, student ID length 4–10 digits.
 - `--id-orientation horizontal` arranges each ID digit as a row of bubbles (0–9 left to right) instead of stacked columns.
 - Pass `--border` if you specifically need the thick outer frame drawn; it is disabled by default for better alignment detection.
+- The PDF automatically prints the output name (e.g., `exam1`) as a centered title near the top margin.
 
 ## Bubble Sheet Scanner
 

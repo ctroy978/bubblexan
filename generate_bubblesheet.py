@@ -385,7 +385,7 @@ def compute_horizontal_safe_area(
     return left, right
 
 
-def render_pdf(layout: Dict[str, object], pdf_path: Path, draw_border: bool = True) -> None:
+def render_pdf(layout: Dict[str, object], pdf_path: Path, draw_border: bool = True, title: Optional[str] = None) -> None:
     width = layout["dimensions"]["width"]
     height = layout["dimensions"]["height"]
     metadata = layout["metadata"]
@@ -393,6 +393,12 @@ def render_pdf(layout: Dict[str, object], pdf_path: Path, draw_border: bool = Tr
     margin = metadata["margin"]
     bubble_radius = metadata["bubble_radius"]
     option_label_gap = metadata.get("option_label_gap", mm_to_points(2.5))
+
+    title_text = title.strip() if title else ""
+    if title_text:
+        c.setFont("Helvetica-Bold", 16)
+        title_y = height - margin / 2 - mm_to_points(1.0)
+        c.drawCentredString(width / 2.0, title_y, title_text)
 
     c.setFont("Helvetica-Bold", 12)
     student_id_columns = layout["student_id"]
@@ -505,7 +511,7 @@ def main() -> None:
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.parent.mkdir(parents=True, exist_ok=True)
 
-    render_pdf(layout, pdf_path, draw_border=args.border)
+    render_pdf(layout, pdf_path, draw_border=args.border, title=base_prefix.name)
     write_layout_json(layout, json_path)
 
     print(f"Created {pdf_path} and {json_path}")
