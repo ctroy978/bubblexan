@@ -23,6 +23,7 @@ QUESTIONS_RANGE = (1, 50)
 ID_LENGTH_RANGE = (4, 10)
 DEFAULT_ID_LENGTH = 6
 OPTIONS = ["A", "B", "C", "D", "E"]
+ID_ORIENTATIONS = ("vertical", "horizontal")
 
 PAPER_SIZES: Dict[str, Tuple[int, int]] = {
     "A4": (595, 842),
@@ -51,10 +52,11 @@ class LayoutSettings:
     student_id_header_gap: float
     digit_label_gap: float
     student_id_marker_clearance: float
+    alignment_clearance: float
 
 
 def build_layout_settings() -> LayoutSettings:
-    bubble_diameter = mm_to_points(5.0)
+    bubble_diameter = mm_to_points(4.0)
     return LayoutSettings(
         margin=36.0,
         bubble_radius=bubble_diameter / 2,
@@ -71,6 +73,7 @@ def build_layout_settings() -> LayoutSettings:
         student_id_header_gap=mm_to_points(8.0),
         digit_label_gap=mm_to_points(2.5),
         student_id_marker_clearance=mm_to_points(6.0),
+        alignment_clearance=mm_to_points(6.0),
     )
 
 
@@ -82,29 +85,45 @@ def validate_inputs(questions: int, id_length: int) -> None:
 
 
 def generate_layout(
-    questions: int, id_length: int, paper_key: str, settings: LayoutSettings
+    questions: int, id_length: int, paper_key: str, id_orientation: str, settings: LayoutSettings
 ) -> Dict[str, object]:
     paper_name = paper_key.upper()
     if paper_name not in PAPER_SIZES:
         allowed = ", ".join(PAPER_SIZES.keys())
         raise ValueError(f"paper-size must be one of: {allowed}")
+    orientation = id_orientation.lower()
+    if orientation not in ID_ORIENTATIONS:
+        allowed = ", ".join(ID_ORIENTATIONS)
+        raise ValueError(f"id-orientation must be one of: {allowed}")
 
     width, height = PAPER_SIZES[paper_name]
     markers = build_alignment_markers(width, height, settings)
     id_top_y = height - settings.margin - settings.title_block
 
+    safe_left, safe_right = compute_horizontal_safe_area(
+        markers=markers,
+        page_width=width,
+        margin=settings.margin,
+        clearance=settings.alignment_clearance,
+    )
+    usable_width = safe_right - safe_left
+    if usable_width <= 0:
+        raise ValueError("Unable to place content horizontally; decrease alignment clearance or adjust paper size.")
+
     clearance_limit = compute_student_id_clearance(markers, height, settings.student_id_marker_clearance)
     if clearance_limit is not None:
-        id_top_y = min(id_top_y, clearance_limit)
+        max_center = clearance_limit - (settings.bubble_radius + settings.student_id_header_gap)
+        id_top_y = min(id_top_y, max_center)
 
     student_id_label_y = id_top_y + settings.bubble_radius + settings.student_id_header_gap
 
     student_id_layout, id_bottom_center_y = build_student_id_layout(
         id_length=id_length,
-        start_x=settings.margin,
+        area_left=safe_left,
+        usable_width=usable_width,
         top_center_y=id_top_y,
+        orientation=orientation,
         settings=settings,
-        page_width=width,
     )
 
     question_area_top = id_bottom_center_y - settings.bubble_radius - settings.section_gap
@@ -112,7 +131,8 @@ def generate_layout(
     question_layout, question_layout_meta = build_question_layout(
         questions=questions,
         area_top=question_area_top,
-        page_width=width,
+        start_x=safe_left,
+        available_width=usable_width,
         settings=settings,
     )
 
@@ -125,6 +145,7 @@ def generate_layout(
         "metadata": {
             "num_questions": questions,
             "id_length": id_length,
+            "student_id_orientation": orientation,
             "bubble_radius": settings.bubble_radius,
             "bubble_diameter": settings.bubble_radius * 2,
             "question_row_height": settings.question_row_height,
@@ -137,6 +158,8 @@ def generate_layout(
             "question_rows": question_layout_meta["rows"],
             "student_id_header_gap": settings.student_id_header_gap,
             "digit_label_gap": settings.digit_label_gap,
+            "content_left": safe_left,
+            "content_right": safe_right,
             "margin": settings.margin,
             "question_area_top": question_area_top,
             "student_id_label_y": student_id_label_y,
@@ -146,19 +169,33 @@ def generate_layout(
 
 def build_student_id_layout(
     id_length: int,
-    start_x: float,
+    area_left: float,
+    usable_width: float,
+    top_center_y: float,
+    orientation: str,
+    settings: LayoutSettings,
+) -> Tuple[List[Dict[str, object]], float]:
+    if orientation == "horizontal":
+        return build_student_id_layout_horizontal(id_length, area_left, usable_width, top_center_y, settings)
+    return build_student_id_layout_vertical(id_length, area_left, usable_width, top_center_y, settings)
+
+
+def build_student_id_layout_vertical(
+    id_length: int,
+    area_left: float,
+    usable_width: float,
     top_center_y: float,
     settings: LayoutSettings,
-    page_width: float,
 ) -> Tuple[List[Dict[str, object]], float]:
     columns: List[Dict[str, object]] = []
-    available_width = page_width - (2 * settings.margin)
-    required_width = (id_length - 1) * settings.id_column_step
-    if required_width + settings.bubble_radius * 2 > available_width:
+
+    total_width = (id_length - 1) * settings.id_column_step + (2 * settings.bubble_radius)
+    if total_width > usable_width:
         raise ValueError("Student ID section does not fit horizontally. Reduce id-length.")
+    start_x = area_left + (usable_width - total_width) / 2.0
 
     for digit_index in range(id_length):
-        column_center_x = start_x + digit_index * settings.id_column_step
+        column_center_x = start_x + settings.bubble_radius + digit_index * settings.id_column_step
         label_y = top_center_y + settings.bubble_radius + settings.digit_label_gap
         column = {
             "digit_index": digit_index + 1,
@@ -176,16 +213,59 @@ def build_student_id_layout(
     return columns, bottom_center_y
 
 
+def build_student_id_layout_horizontal(
+    id_length: int,
+    area_left: float,
+    usable_width: float,
+    top_center_y: float,
+    settings: LayoutSettings,
+) -> Tuple[List[Dict[str, object]], float]:
+    columns: List[Dict[str, object]] = []
+    num_values = 10
+    total_width = (num_values - 1) * settings.id_column_step + (2 * settings.bubble_radius)
+    if total_width > usable_width:
+        raise ValueError("Student ID section does not fit horizontally. Reduce id-length or paper size.")
+
+    start_x = area_left + (usable_width - total_width) / 2.0
+    label_x_offset = settings.question_label_width / 2.0 + settings.option_label_gap
+
+    for digit_index in range(id_length):
+        center_y = top_center_y - digit_index * settings.id_vertical_step
+        label_x = start_x - label_x_offset
+        column = {
+            "digit_index": digit_index + 1,
+            "label_position": {
+                "x": label_x,
+                "y": center_y - settings.bubble_radius / 2.0,
+            },
+            "bubbles": [],
+        }
+        for value_index in range(num_values):
+            center_x = start_x + settings.bubble_radius + value_index * settings.id_column_step
+            column["bubbles"].append(
+                {
+                    "value": str(value_index),
+                    "x": center_x,
+                    "y": center_y,
+                    "radius": settings.bubble_radius,
+                }
+            )
+        columns.append(column)
+
+    bottom_center_y = top_center_y - (max(0, id_length - 1) * settings.id_vertical_step)
+    return columns, bottom_center_y
+
+
 def build_question_layout(
     questions: int,
     area_top: float,
-    page_width: float,
+    start_x: float,
+    available_width: float,
     settings: LayoutSettings,
 ) -> Tuple[List[Dict[str, object]], Dict[str, float | int]]:
     question_block_width = settings.question_label_width + (2 * settings.bubble_radius) + settings.option_step * (
         len(OPTIONS) - 1
     )
-    available_width = page_width - (2 * settings.margin)
     available_height = area_top - (settings.margin + settings.bubble_radius)
     if available_height <= settings.question_row_height:
         raise ValueError("Not enough vertical space for the questions section. Try reducing id-length.")
@@ -234,7 +314,7 @@ def build_question_layout(
     question_number = 1
 
     for column_index in range(chosen_columns):
-        column_x = settings.margin + column_index * (question_block_width + column_spacing)
+        column_x = start_x + column_index * (question_block_width + column_spacing)
         for row_index in range(chosen_rows):
             if question_number > questions:
                 break
@@ -253,7 +333,7 @@ def build_question_layout(
 
 
 def build_alignment_markers(width: float, height: float, settings: LayoutSettings) -> List[Dict[str, float]]:
-    size = mm_to_points(8.0)
+    size = mm_to_points(12.0)
     offset = settings.margin / 2
     return [
         {"type": "square", "x": offset, "y": offset, "size": size},
@@ -273,16 +353,39 @@ def compute_student_id_clearance(
     for marker in markers:
         y = marker.get("y", 0.0)
         size = marker.get("size", 0.0)
-        marker_is_top = y >= halfway or (y + size) >= halfway
+        marker_is_top = (y + size / 2.0) >= halfway
         if marker_is_top:
             limits.append(y - clearance)
     if not limits:
         return None
-    limit = min(limits)
-    return max(clearance, limit)
+    return min(limits)
 
 
-def render_pdf(layout: Dict[str, object], pdf_path: Path) -> None:
+def compute_horizontal_safe_area(
+    markers: List[Dict[str, float]],
+    page_width: float,
+    margin: float,
+    clearance: float,
+) -> Tuple[float, float]:
+    left = margin
+    right = page_width - margin
+    if not markers:
+        return left, right
+    halfway = page_width / 2.0
+    for marker in markers:
+        x = marker.get("x", 0.0)
+        size = marker.get("size", 0.0)
+        center_x = x + size / 2.0
+        if center_x <= halfway:
+            left = max(left, x + size + clearance)
+        else:
+            right = min(right, x - clearance)
+    if right <= left:
+        return margin, page_width - margin
+    return left, right
+
+
+def render_pdf(layout: Dict[str, object], pdf_path: Path, draw_border: bool = True) -> None:
     width = layout["dimensions"]["width"]
     height = layout["dimensions"]["height"]
     metadata = layout["metadata"]
@@ -292,7 +395,11 @@ def render_pdf(layout: Dict[str, object], pdf_path: Path) -> None:
     option_label_gap = metadata.get("option_label_gap", mm_to_points(2.5))
 
     c.setFont("Helvetica-Bold", 12)
-    c.drawString(margin, metadata["student_id_label_y"], "Student ID")
+    student_id_columns = layout["student_id"]
+    student_label_x = margin
+    if student_id_columns:
+        student_label_x = min(col["label_position"]["x"] for col in student_id_columns)
+    c.drawString(student_label_x, metadata["student_id_label_y"], "Student ID")
 
     c.setFont("Helvetica", 10)
 
@@ -316,7 +423,21 @@ def render_pdf(layout: Dict[str, object], pdf_path: Path) -> None:
 
     for marker in layout["alignment_markers"]:
         c.setStrokeColor(colors.black)
-        c.rect(marker["x"], marker["y"], marker["size"], marker["size"], stroke=1, fill=0)
+        c.setFillColor(colors.black)
+        c.rect(marker["x"], marker["y"], marker["size"], marker["size"], stroke=0, fill=1)
+    if draw_border:
+        c.setFillColor(colors.black)
+        c.setLineWidth(4)
+        border_offset = metadata["margin"] / 2
+        c.rect(
+            border_offset,
+            border_offset,
+            width - border_offset * 2,
+            height - border_offset * 2,
+            stroke=1,
+            fill=0,
+        )
+        c.setLineWidth(1)
 
     c.showPage()
     c.save()
@@ -338,6 +459,12 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_ID_LENGTH,
         help=f"Number of digits in the student ID ({ID_LENGTH_RANGE[0]}-{ID_LENGTH_RANGE[1]}).",
     )
+    parser.add_argument(
+        "--id-orientation",
+        choices=ID_ORIENTATIONS,
+        default="vertical",
+        help="Arrange student ID bubbles vertically (default) or horizontally (digits in rows).",
+    )
     parser.add_argument("--output", required=True, help="Output filename prefix (without extension).")
     parser.add_argument(
         "--output-dir",
@@ -350,6 +477,11 @@ def parse_args() -> argparse.Namespace:
         choices=sorted(PAPER_SIZES.keys()),
         help="Paper size for the PDF.",
     )
+    parser.add_argument(
+        "--border",
+        action="store_true",
+        help="Draw the thick outer border rectangle (disabled by default to avoid interference during scanning).",
+    )
     return parser.parse_args()
 
 
@@ -358,7 +490,7 @@ def main() -> None:
     settings = build_layout_settings()
     validate_inputs(args.questions, args.id_length)
 
-    layout = generate_layout(args.questions, args.id_length, args.paper_size, settings)
+    layout = generate_layout(args.questions, args.id_length, args.paper_size, args.id_orientation, settings)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -373,7 +505,7 @@ def main() -> None:
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.parent.mkdir(parents=True, exist_ok=True)
 
-    render_pdf(layout, pdf_path)
+    render_pdf(layout, pdf_path, draw_border=args.border)
     write_layout_json(layout, json_path)
 
     print(f"Created {pdf_path} and {json_path}")

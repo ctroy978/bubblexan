@@ -8,6 +8,8 @@ Create a printable bubble sheet PDF and matching JSON guide rail.
 python generate_bubblesheet.py \
   --questions 25 \
   --id-length 6 \
+  [--id-orientation vertical|horizontal] \
+  [--border] \
   --output exam1 \
   [--paper-size A4] \
   [--output-dir output]
@@ -15,6 +17,8 @@ python generate_bubblesheet.py \
 
 - Produces `output/exam1.pdf` and `output/exam1_layout.json` (unless an absolute `--output` path is supplied).
 - Questions can range from 1–50, student ID length 4–10 digits.
+- `--id-orientation horizontal` arranges each ID digit as a row of bubbles (0–9 left to right) instead of stacked columns.
+- Pass `--border` if you specifically need the thick outer frame drawn; it is disabled by default for better alignment detection.
 
 ## Bubble Sheet Scanner
 
@@ -32,6 +36,20 @@ python scan_bubblesheet.py \
 
 - Use `--image` for one file or `--folder` (directory or .zip) for batches.
 - Results land in `output/results.csv` and a log file (defaults to the same prefix with `.log`).
+
+### Visualization Helper
+
+Use `testvision.py` to overlay bubble locations/scores on top of a scanned image when you need to debug alignment or thresholding:
+
+```bash
+python testvision.py \
+  --image output/png/exam1_page01.png \
+  --json output/exam1_layout.json \
+  --output output/annotated.png \
+  [--threshold 0.35] [--relative-threshold 0.6] [--alpha 0.6]
+```
+
+The script emits a blended PNG showing each bubble’s measured fill ratio (color-coded and labeled) plus any transform warnings when `--show-warnings` is passed.
 
 ## PDF → PNG Converter
 

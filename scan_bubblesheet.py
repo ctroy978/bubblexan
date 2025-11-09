@@ -76,8 +76,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--threshold",
         type=float,
-        default=0.5,
-        help="Fill ratio threshold (0-1) to consider a bubble selected.",
+        default=0.35,
+        help="Absolute fill ratio threshold (0-1) to accept a bubble without fallback.",
+    )
+    parser.add_argument(
+        "--relative-threshold",
+        type=float,
+        default=0.6,
+        help="Fallback ratio of the darkest bubble intensity for selecting answers when no bubble meets the absolute threshold.",
     )
     parser.add_argument(
         "--log",
@@ -217,6 +223,70 @@ def detect_alignment_markers(gray: np.ndarray, max_markers: int = 4) -> List[Tup
     return [(c[1], c[2]) for c in candidates[:max_markers]]
 
 
+def detect_guided_alignment_markers(
+    gray: np.ndarray,
+    layout: LayoutGuide,
+    window_radius: int,
+    max_markers: int = 4,
+) -> List[Tuple[float, float]]:
+    image_h, image_w = gray.shape[:2]
+    scale_x = image_w / layout.width
+    scale_y = image_h / layout.height
+    guided: List[Tuple[float, float, float]] = []
+    for marker in layout.alignment_markers[:max_markers]:
+        size = marker.get("size", 0.0)
+        center_x = marker["x"] + size / 2.0
+        center_y = marker["y"] + size / 2.0
+        approx_x = center_x * scale_x
+        approx_y = (layout.height - center_y) * scale_y
+        x1 = max(0, int(round(approx_x - window_radius)))
+        y1 = max(0, int(round(approx_y - window_radius)))
+        x2 = min(image_w, int(round(approx_x + window_radius)))
+        y2 = min(image_h, int(round(approx_y + window_radius)))
+        if x2 <= x1 or y2 <= y1:
+            continue
+        roi = gray[y1:y2, x1:x2]
+        blur = cv2.GaussianBlur(roi, (5, 5), 0)
+        _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        best_area = 0.0
+        best_center: Optional[Tuple[float, float]] = None
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < 50:
+                continue
+            M = cv2.moments(contour)
+            if M["m00"] == 0:
+                continue
+            cx = M["m10"] / M["m00"] + x1
+            cy = M["m01"] / M["m00"] + y1
+            if area > best_area:
+                best_area = area
+                best_center = (cx, cy)
+        if best_center is not None:
+            guided.append((best_area, best_center[0], best_center[1]))
+    guided.sort(reverse=True, key=lambda item: item[0])
+    return [(c[1], c[2]) for c in guided[:max_markers]]
+
+
+def detect_page_corners(gray: np.ndarray) -> Optional[List[Tuple[float, float]]]:
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    edged = cv2.Canny(blur, 50, 150)
+    edged = cv2.dilate(edged, None, iterations=2)
+    edged = cv2.erode(edged, None, iterations=1)
+    contours, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area < 1000:
+            continue
+        peri = cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
+        if len(approx) == 4:
+            return [(float(pt[0][0]), float(pt[0][1])) for pt in approx]
+    return None
+
+
 def build_layout_to_image_transform(
     layout: LayoutGuide, gray_image: np.ndarray
 ) -> Tuple[np.ndarray, List[str]]:
@@ -224,8 +294,16 @@ def build_layout_to_image_transform(
     image_h, image_w = gray_image.shape[:2]
     layout_markers = layout.alignment_markers[:4]
     detected_markers = detect_alignment_markers(gray_image) if layout_markers else []
+    guided_used = False
+    if len(layout_markers) == 4 and len(detected_markers) < 4:
+        window = int(max(image_w, image_h) * 0.12)
+        guided = detect_guided_alignment_markers(gray_image, layout, window)
+        if len(guided) == 4:
+            detected_markers = guided
+            guided_used = True
     use_alignment = False
     matrix: Optional[np.ndarray] = None
+    page_corners: Optional[List[Tuple[float, float]]] = None
 
     if len(layout_markers) == 4 and len(detected_markers) == 4:
         layout_points = []
@@ -239,21 +317,81 @@ def build_layout_to_image_transform(
         detected_arr = np.array(detected_ordered, dtype=np.float32)
         span_w = float(detected_arr[:, 0].max() - detected_arr[:, 0].min())
         span_h = float(detected_arr[:, 1].max() - detected_arr[:, 1].min())
-        min_span_w = image_w * 0.4
-        min_span_h = image_h * 0.4
+        min_span_w = image_w * 0.25
+        min_span_h = image_h * 0.25
         if span_w >= min_span_w and span_h >= min_span_h:
             matrix = cv2.getPerspectiveTransform(
                 np.array(layout_points_ordered, dtype=np.float32),
                 detected_arr,
             )
             use_alignment = True
+            if guided_used:
+                warnings.append("Alignment markers recovered via guided search.")
         else:
             warnings.append("Detected markers cover too small an area; using proportional mapping instead.")
 
     if not use_alignment or matrix is None:
-        if len(layout_markers) < 4:
+        page_corners = detect_page_corners(gray_image)
+        if page_corners is not None:
+            page_ordered = order_points_clockwise(page_corners)
+
+            layout_page_corners = order_points_clockwise(
+                [
+                    to_top_left_coords(0, layout.height, layout.height),
+                    to_top_left_coords(layout.width, layout.height, layout.height),
+                    to_top_left_coords(layout.width, 0, layout.height),
+                    to_top_left_coords(0, 0, layout.height),
+                ]
+            )
+
+            use_border_frame = False
+            border_offset = float(layout.metadata.get("margin", 0.0)) / 2.0
+            if border_offset > 0:
+                image_h, image_w = gray_image.shape[:2]
+                xs = [pt[0] for pt in page_ordered]
+                ys = [pt[1] for pt in page_ordered]
+                inset_left = max(0.0, min(xs))
+                inset_right = max(0.0, image_w - max(xs))
+                inset_top = max(0.0, min(ys))
+                inset_bottom = max(0.0, image_h - max(ys))
+                sum_inset_x = inset_left + inset_right
+                sum_inset_y = inset_top + inset_bottom
+                sum_ratio_x = sum_inset_x / max(1.0, image_w)
+                sum_ratio_y = sum_inset_y / max(1.0, image_h)
+                expected_sum_ratio_x = (2.0 * border_offset) / layout.width
+                expected_sum_ratio_y = (2.0 * border_offset) / layout.height
+                tol_x = max(0.02, expected_sum_ratio_x * 0.6)
+                tol_y = max(0.02, expected_sum_ratio_y * 0.6)
+                close_x = abs(sum_ratio_x - expected_sum_ratio_x) <= tol_x
+                close_y = abs(sum_ratio_y - expected_sum_ratio_y) <= tol_y
+                if close_x and close_y:
+                    use_border_frame = True
+
+            if use_border_frame:
+                layout_border_corners = order_points_clockwise(
+                    [
+                        to_top_left_coords(border_offset, layout.height - border_offset, layout.height),
+                        to_top_left_coords(layout.width - border_offset, layout.height - border_offset, layout.height),
+                        to_top_left_coords(layout.width - border_offset, border_offset, layout.height),
+                        to_top_left_coords(border_offset, border_offset, layout.height),
+                    ]
+                )
+                chosen_layout = layout_border_corners
+                warnings.append("Detected inner border frame for alignment.")
+            else:
+                chosen_layout = layout_page_corners
+                warnings.append("Using page border for alignment.")
+
+            matrix = cv2.getPerspectiveTransform(
+                np.array(chosen_layout, dtype=np.float32),
+                np.array(page_ordered, dtype=np.float32),
+            )
+            use_alignment = True
+
+    if not use_alignment or matrix is None:
+        if len(layout_markers) < 4 and page_corners is None:
             warnings.append("Insufficient layout markers; using proportional mapping.")
-        elif len(detected_markers) < 4:
+        elif len(detected_markers) < 4 and page_corners is None:
             warnings.append("Failed to detect alignment markers; using proportional mapping.")
         scale_x = image_w / layout.width
         scale_y = image_h / layout.height
@@ -313,6 +451,8 @@ def scan_student_id(
     layout: LayoutGuide,
     matrix: np.ndarray,
     threshold: float,
+    relative_threshold: float,
+    min_darkness: float = 0.08,
 ) -> Tuple[str, List[str]]:
     warnings: List[str] = []
     digits: List[str] = []
@@ -326,13 +466,26 @@ def scan_student_id(
         hits = [label for (label, score) in column_scores if score >= threshold]
         if len(hits) == 1:
             digits.append(hits[0])
-        elif len(hits) == 0:
-            best_label, best_score = max(column_scores, key=lambda item: item[1])
-            warnings.append(f"Digit {column.digit_index}: no bubble above threshold (best {best_label}={best_score:.2f}).")
+            continue
+
+        best_label, best_score = max(column_scores, key=lambda item: item[1])
+        rival_score = sorted([score for _, score in column_scores], reverse=True)[1] if len(column_scores) > 1 else 0.0
+
+        if best_score < min_darkness:
+            warnings.append(
+                f"Digit {column.digit_index}: no bubble above threshold and best mark too light (best {best_label}={best_score:.2f})."
+            )
             digits.append("?")
-        else:
-            warnings.append(f"Digit {column.digit_index}: multiple selections {hits}.")
+            continue
+
+        if rival_score >= best_score * relative_threshold:
+            warnings.append(
+                f"Digit {column.digit_index}: ambiguous fill ({best_label}={best_score:.2f}, next={rival_score:.2f})."
+            )
             digits.append("?")
+            continue
+
+        digits.append(best_label)
     student_id = "".join(digits)
     if "?" in student_id or not student_id:
         warnings.append("Student ID unresolved.")
@@ -345,6 +498,8 @@ def scan_answers(
     layout: LayoutGuide,
     matrix: np.ndarray,
     threshold: float,
+    relative_threshold: float,
+    min_darkness: float = 0.08,
 ) -> Tuple[Dict[int, str], List[str]]:
     answers: Dict[int, str] = {}
     warnings: List[str] = []
@@ -356,12 +511,28 @@ def scan_answers(
             score = measure_bubble_fill(gray, center, radius)
             option_scores.append((bubble.label, score))
         selections = [label for (label, score) in option_scores if score >= threshold]
-        if not selections:
-            best_label, best_score = max(option_scores, key=lambda item: item[1])
-            warnings.append(f"Question {question.number}: no selection above threshold (best {best_label}={best_score:.2f}).")
-            answers[question.number] = ""
-        else:
+        if selections:
             answers[question.number] = ",".join(sorted(selections))
+            continue
+
+        best_label, best_score = max(option_scores, key=lambda item: item[1])
+        if best_score < min_darkness:
+            warnings.append(
+                f"Question {question.number}: no selection above threshold and best mark too light "
+                f"(best {best_label}={best_score:.2f})."
+            )
+            answers[question.number] = ""
+            continue
+
+        cutoff = max(threshold * 0.5, best_score * relative_threshold)
+        fallback = [label for (label, score) in option_scores if score >= cutoff]
+        if not fallback:
+            fallback = [best_label]
+
+        answers[question.number] = ",".join(sorted(fallback))
+        warnings.append(
+            f"Question {question.number}: using relative threshold fallback (best {best_label}={best_score:.2f})."
+        )
     return answers, warnings
 
 
@@ -370,12 +541,13 @@ def scan_image(
     image: np.ndarray,
     layout: LayoutGuide,
     threshold: float,
+    relative_threshold: float,
 ) -> ScanResult:
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     matrix, transform_warnings = build_layout_to_image_transform(layout, gray)
 
-    student_id, id_warnings = scan_student_id(gray, layout, matrix, threshold)
-    answers, answer_warnings = scan_answers(gray, layout, matrix, threshold)
+    student_id, id_warnings = scan_student_id(gray, layout, matrix, threshold, relative_threshold)
+    answers, answer_warnings = scan_answers(gray, layout, matrix, threshold, relative_threshold)
 
     warnings = [f"{source_name}: {msg}" for msg in (transform_warnings + id_warnings + answer_warnings)]
     return ScanResult(source_name=source_name, student_id=student_id, answers=answers, warnings=warnings)
@@ -431,6 +603,7 @@ def main() -> None:
     output_path, log_path = resolve_output_paths(args.output, args.log, output_dir)
 
     threshold = args.threshold
+    relative_threshold = args.relative_threshold
     if not (0.0 < threshold <= 1.0):
         raise ValueError("threshold must be between 0 and 1.")
 
@@ -442,7 +615,7 @@ def main() -> None:
 
     for name, image in iter_image_sources(image_path, folder_path):
         try:
-            result = scan_image(name, image, layout, threshold)
+            result = scan_image(name, image, layout, threshold, relative_threshold)
         except Exception as exc:  # noqa: BLE001
             log_entries.append(f"{name}: ERROR processing image ({exc}).")
             answers = {q.number: "" for q in layout.questions}
