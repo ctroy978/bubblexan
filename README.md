@@ -52,6 +52,24 @@ python testvision.py \
 
 The script emits a blended PNG showing each bubble’s measured fill ratio (color-coded and labeled) plus any transform warnings when `--show-warnings` is passed.
 
+## Question Miss Analyzer
+
+Compare the scanner’s CSV against an answer key to spot questions most students missed (and summarize partial credit on select-all prompts):
+
+```bash
+python analyze_misses.py \
+  --results output/results.csv \
+  --key answer_key.csv \
+  --output output/miss_report.csv \
+  [--miss-threshold 50] \
+  [--partial-threshold 1.0] \
+  [--log miss_report.log]
+```
+
+- Pass the scanner CSV via `--results` and an answer-key CSV (`Question,Answer`) via `--key`.
+- Multi-answer keys can use bracket or comma syntax (e.g., `[A,B,E]`); set `--partial-threshold` < 1.0 to award credit for subsets.
+- The tool writes a per-question CSV detailing percent missed, counts, and partial-credit notes, and highlights questions above the miss threshold in the console.
+
 ## PDF → PNG Converter
 
 Render generator PDFs into raster images for the scanner or other tools. Requires a Poppler installation accessible on your PATH.
