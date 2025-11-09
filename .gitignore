@@ -17,6 +17,7 @@ env/
 # Local artifacts
 *.pdf
 *_layout.json
+output/
 
 # Env files
 .env
