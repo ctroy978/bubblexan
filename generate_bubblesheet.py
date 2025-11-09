@@ -13,7 +13,7 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from reportlab.lib import colors
 from reportlab.pdfgen import canvas
@@ -50,6 +50,7 @@ class LayoutSettings:
     title_block: float
     student_id_header_gap: float
     digit_label_gap: float
+    student_id_marker_clearance: float
 
 
 def build_layout_settings() -> LayoutSettings:
@@ -69,6 +70,7 @@ def build_layout_settings() -> LayoutSettings:
         title_block=mm_to_points(18.0),
         student_id_header_gap=mm_to_points(8.0),
         digit_label_gap=mm_to_points(2.5),
+        student_id_marker_clearance=mm_to_points(6.0),
     )
 
 
@@ -88,7 +90,12 @@ def generate_layout(
         raise ValueError(f"paper-size must be one of: {allowed}")
 
     width, height = PAPER_SIZES[paper_name]
+    markers = build_alignment_markers(width, height, settings)
     id_top_y = height - settings.margin - settings.title_block
+
+    clearance_limit = compute_student_id_clearance(markers, height, settings.student_id_marker_clearance)
+    if clearance_limit is not None:
+        id_top_y = min(id_top_y, clearance_limit)
 
     student_id_label_y = id_top_y + settings.bubble_radius + settings.student_id_header_gap
 
@@ -108,8 +115,6 @@ def generate_layout(
         page_width=width,
         settings=settings,
     )
-
-    markers = build_alignment_markers(width, height, settings)
 
     return {
         "paper_size": paper_name,
@@ -256,6 +261,25 @@ def build_alignment_markers(width: float, height: float, settings: LayoutSetting
         {"type": "square", "x": offset, "y": height - offset - size, "size": size},
         {"type": "square", "x": width - offset - size, "y": height - offset - size, "size": size},
     ]
+
+
+def compute_student_id_clearance(
+    markers: List[Dict[str, float]], page_height: float, clearance: float
+) -> Optional[float]:
+    if not markers:
+        return None
+    halfway = page_height / 2.0
+    limits: List[float] = []
+    for marker in markers:
+        y = marker.get("y", 0.0)
+        size = marker.get("size", 0.0)
+        marker_is_top = y >= halfway or (y + size) >= halfway
+        if marker_is_top:
+            limits.append(y - clearance)
+    if not limits:
+        return None
+    limit = min(limits)
+    return max(clearance, limit)
 
 
 def render_pdf(layout: Dict[str, object], pdf_path: Path) -> None:
