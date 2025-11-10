@@ -105,3 +105,22 @@ python convert_pdf_to_png.py \
 
 - Handles single PDFs, folders, or zipped collections.
 - Saves numbered images such as `output/png/exam1_page01.png`, ready for OpenCV processing.
+
+## Grading App
+
+Generate per-student totals and question statistics by pairing a response CSV (such as `output/results.csv` or any future `temp_report.csv`) with an answer key (`Question,Correct_Answer,Points`):
+
+```bash
+python grade.py \
+  output/results.csv \
+  output/answer_key.csv \
+  --output-dir output
+```
+
+This writes `graded_report.csv` plus `graded_report.xlsx` (Grades + Question_Stats sheets) into the requested directory. Provide any CSV with columns `student_id,question_id,selected_answers`; multi-select selections should be comma-separated.
+
+## Scoring Details
+
+- **Single-select questions**: a response earns the full point value only when every selected option matches the key exactly; otherwise it earns zero.
+- **Multiple-select questions**: let `P` be the point value and `C` the number of correct options. For each response compute `S_c = |selected ∩ correct|` and `S_i = |selected − correct|`. Each correct option is worth `P / C` points and each incorrect option deducts the same amount, so the raw score is `(S_c − S_i) * (P / C)`. The awarded score is `max(0, raw score)` rounded to two decimals (never negative even if the penalty exceeds the reward).
+- **Percent grades**: each student’s percent is `(total_score / total_possible_points) * 100`, rounded to two decimals. Question-level “percent_correct” equals the mean score for that question divided by its max points, times 100.
