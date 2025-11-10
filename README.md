@@ -21,6 +21,26 @@ python generate_bubblesheet.py \
 - Pass `--border` if you specifically need the thick outer frame drawn; it is disabled by default for better alignment detection.
 - The PDF automatically prints the output name (e.g., `exam1`) as a centered title near the top margin.
 
+## QTI Test Generator
+
+Convert Canvas QTI exports into a printable test (PDF) plus an answer-key CSV ready for the scanner pipeline:
+
+```bash
+python generate_test_from_qti.py \
+  --zip ~/Downloads/sample.zip \
+  [--qti path/to/custom_qti.xml] \
+  [--meta path/to/assessment_meta.xml] \
+  [--manifest path/to/imsmanifest.xml] \
+  --output-dir output \
+  [--page-size LETTER|A4] \
+  --output-prefix week2_exam
+```
+
+- Emits `output/week2_exam_test.pdf` (questions with lettered a–e options, header/footer, name/date lines) and `output/week2_exam_answer_key.csv` (columns `Question,Correct_Answer,Points`).
+- When `--zip` is supplied, the tool automatically extracts the Canvas export, locates the primary QTI XML, `assessment_meta.xml`, and `imsmanifest.xml`; you can still override any of them with explicit `--qti/--meta/--manifest` paths if needed.
+- Multi-answer prompts automatically include “Select all that apply.” and the answer key stores comma-separated letters (e.g., `a,c,e`) compatible with `scan_bubblesheet.py`.
+- The tool validates total points against `assessment_meta.xml` and can optionally read `imsmanifest.xml` for informational checks.
+
 ## Bubble Sheet Scanner
 
 Process scanned bubble sheets (single image, directory, or .zip) using the generator’s layout JSON and emit a CSV plus optional log.
